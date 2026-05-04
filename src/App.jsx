@@ -1,23 +1,23 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useCallback, useEffect, useState } from 'react'
+import { BrowserRouter, Route, Routes } from 'react-router-dom'
 import { supabase } from './lib/supabaseClient'
 
-import Sidebar              from './components/Sidebar'
-import Header               from './components/Header'
-import RoomStatusCard       from './components/RoomStatusCard'
-import AlertPanel           from './components/AlertPanel'
-import StatsBar             from './components/StatsBar'
-import DoorLogTable         from './components/DoorLogTable'
-import LockerLogTable       from './components/LockerLogTable'
-import CustomerManagement   from './components/CustomerManagement'
-import AccessHistory        from './components/AccessHistory'
+import Sidebar from './components/Sidebar'
+import Header from './components/Header'
+import RoomStatusCard from './components/RoomStatusCard'
+import AlertPanel from './components/AlertPanel'
+import StatsBar from './components/StatsBar'
+import DoorLogTable from './components/DoorLogTable'
+import LockerLogTable from './components/LockerLogTable'
+import CustomerManagement from './components/CustomerManagement'
+import AccessHistory from './components/AccessHistory'
+import Settings from './components/Settings'
 
-export default function App() {
-  const [activePage, setActivePage] = useState('dashboard')
-  const [doorLogs,   setDoorLogs]   = useState([])
+function Dashboard() {
+  const [doorLogs, setDoorLogs] = useState([])
   const [lockerLogs, setLockerLogs] = useState([])
-  const [loading,    setLoading]    = useState(true)
+  const [loading, setLoading] = useState(true)
 
-  // ─── Fetch: view_log_pintu ────────────────────────────────────
   const fetchDoorLogs = useCallback(async () => {
     if (!supabase) return
     try {
@@ -27,10 +27,12 @@ export default function App() {
         .order('waktu_akses', { ascending: false })
         .limit(50)
       if (!error && data) setDoorLogs(data)
-    } catch (e) { console.error('fetchDoorLogs:', e) }
+      else if (error) console.error('fetchDoorLogs:', error)
+    } catch (e) {
+      console.error('fetchDoorLogs:', e)
+    }
   }, [])
 
-  // ─── Fetch: view_log_loker ────────────────────────────────────
   const fetchLockerLogs = useCallback(async () => {
     if (!supabase) return
     try {
@@ -40,37 +42,43 @@ export default function App() {
         .order('waktu_akses', { ascending: false })
         .limit(50)
       if (!error && data) setLockerLogs(data)
-    } catch (e) { console.error('fetchLockerLogs:', e) }
+      else if (error) console.error('fetchLockerLogs:', error)
+    } catch (e) {
+      console.error('fetchLockerLogs:', e)
+    }
   }, [])
 
-  // ─── Initial Load ─────────────────────────────────────────────
   useEffect(() => {
-    const init = async () => {
+    let active = true
+
+    Promise.resolve().then(async () => {
+      if (!active) return
       setLoading(true)
       await Promise.all([fetchDoorLogs(), fetchLockerLogs()])
-      setLoading(false)
-    }
-    init()
+      if (active) setLoading(false)
+    })
+
+    return () => { active = false }
   }, [fetchDoorLogs, fetchLockerLogs])
 
-  // ─── Realtime Subscriptions ───────────────────────────────────
   useEffect(() => {
-    if (!supabase) return
+    if (!supabase) return undefined
+
     const channel = supabase
       .channel('dashboard-realtime')
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'log_pintu' },  () => fetchDoorLogs())
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'log_pintu' }, () => fetchDoorLogs())
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'log_loker' }, () => fetchLockerLogs())
       .subscribe()
+
     return () => { supabase.removeChannel(channel) }
   }, [fetchDoorLogs, fetchLockerLogs])
 
-  const latestPintu = doorLogs[0]   ?? null
+  const latestPintu = doorLogs[0] ?? null
   const latestLoker = lockerLogs[0] ?? null
 
-  // ─── Loading ──────────────────────────────────────────────────
   if (loading) {
     return (
-      <div style={{ minHeight: '100vh', background: 'var(--bg-body)', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'background 0.25s ease' }}>
+      <div style={{ minHeight: 'calc(100vh - 140px)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
         <div style={{ textAlign: 'center' }}>
           <div style={{
             width: '56px', height: '56px', margin: '0 auto 16px',
@@ -97,16 +105,27 @@ export default function App() {
     )
   }
 
-  // ─── Main Layout ──────────────────────────────────────────────
+  return (
+    <>
+      <Header />
+      <RoomStatusCard latestPintu={latestPintu} />
+      <AlertPanel latestPintu={latestPintu} latestLoker={latestLoker} />
+      <StatsBar doorLogs={doorLogs} lockerLogs={lockerLogs} />
+      <div className="log-grid">
+        <DoorLogTable logs={doorLogs} />
+        <LockerLogTable logs={lockerLogs} />
+      </div>
+    </>
+  )
+}
+
+function MainLayout() {
   return (
     <div style={{ display: 'flex', width: '100%', minHeight: '100vh', background: 'var(--bg-body)', transition: 'background 0.25s ease' }}>
-      {/* Fixed Sidebar */}
-      <Sidebar activePage={activePage} onNavigate={setActivePage} />
+      <Sidebar />
       <div className="sidebar-spacer" />
 
-      {/* Main Column */}
       <div className="main-wrapper">
-        {/* Sticky Top Bar */}
         <div className="top-bar">
           <span style={{ fontSize: '15px', fontWeight: 700, color: 'var(--topbar-title)' }}>SmartSafe IoT</span>
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -129,32 +148,30 @@ export default function App() {
           </div>
         </div>
 
-        {/* Page Content */}
         <main style={{ flex: 1, padding: '28px 28px 40px' }}>
-          {activePage === 'customers' ? (
-            <CustomerManagement />
-          ) : activePage === 'history' ? (
-            <AccessHistory />
-          ) : (
-            <>
-              <Header />
-              <RoomStatusCard latestPintu={latestPintu} />
-              <AlertPanel     latestPintu={latestPintu} latestLoker={latestLoker} />
-              <StatsBar       doorLogs={doorLogs}        lockerLogs={lockerLogs} />
-              <div className="log-grid">
-                <DoorLogTable   logs={doorLogs} />
-                <LockerLogTable logs={lockerLogs} />
-              </div>
-            </>
-          )}
+          <Routes>
+            <Route path="/" element={<Dashboard />} />
+            <Route path="/customers" element={<CustomerManagement />} />
+            <Route path="/history" element={<AccessHistory />} />
+            <Route path="/settings" element={<Settings />} />
+          </Routes>
+
           <footer style={{ marginTop: '36px', paddingTop: '20px', borderTop: '1px solid var(--border-footer)', textAlign: 'center' }}>
             <p style={{ fontSize: '12.5px', color: 'var(--footer-text)' }}>
-              Smart Safe Deposit Box © {new Date().getFullYear()} —{' '}
+              Smart Safe Deposit Box © {new Date().getFullYear()} -{' '}
               Real-time <span style={{ color: '#3b82f6', fontWeight: 600 }}>IoT Monitoring System</span>
             </p>
           </footer>
         </main>
       </div>
     </div>
+  )
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <MainLayout />
+    </BrowserRouter>
   )
 }

@@ -1,16 +1,15 @@
-export default function Sidebar({ activePage = 'dashboard', onNavigate }) {
-  const navItems = [
-    { id: 'dashboard', label: 'Dashboard',     icon: 'dashboard' },
-    { id: 'customers', label: 'Nasabah',        icon: 'group' },
-    { id: 'history',   label: 'Riwayat Akses', icon: 'history' },
-    { id: 'locker',    label: 'Locker Access',  icon: 'lock' },
-    { id: 'door',      label: 'Door Logs',      icon: 'sensor_door' },
-    { id: 'health',    label: 'System Health',  icon: 'health_and_safety' },
-  ]
+import { NavLink } from 'react-router-dom'
 
+const navItems = [
+  { to: '/', label: 'Dashboard', icon: 'dashboard', end: true },
+  { to: '/customers', label: 'Manajemen Nasabah', icon: 'group' },
+  { to: '/history', label: 'Riwayat Akses', icon: 'history' },
+  { to: '/settings', label: 'Pengaturan Sistem', icon: 'settings' },
+]
+
+export default function Sidebar() {
   return (
     <aside className="sidebar">
-      {/* Logo */}
       <div className="sidebar-logo">
         <div className="sidebar-logo-icon">
           <span className="material-symbols-outlined" style={{ color: 'white', fontSize: '18px' }}>lock_open</span>
@@ -21,22 +20,20 @@ export default function Sidebar({ activePage = 'dashboard', onNavigate }) {
         </div>
       </div>
 
-      {/* Navigation */}
       <nav style={{ flex: 1, padding: '14px 12px', display: 'flex', flexDirection: 'column', gap: '2px' }}>
         {navItems.map((item) => (
-          <button
-            key={item.id}
-            onClick={() => onNavigate?.(item.id)}
-            className={`nav-item ${activePage === item.id ? 'active' : ''}`}
-            style={{ textAlign: 'left', width: '100%', background: 'none', border: 'none', cursor: 'pointer' }}
+          <NavLink
+            key={item.to}
+            to={item.to}
+            end={item.end}
+            className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
           >
             <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>{item.icon}</span>
             {item.label}
-          </button>
+          </NavLink>
         ))}
       </nav>
 
-      {/* System Status */}
       <div style={{ padding: '14px 12px', borderTop: '1px solid var(--divider)' }}>
         <div style={{
           padding: '12px 14px',
