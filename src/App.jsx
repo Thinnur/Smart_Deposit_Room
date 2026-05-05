@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { BrowserRouter, Route, Routes } from 'react-router-dom'
+import { HashRouter as Router, Routes, Route } from 'react-router-dom'
 import { supabase } from './lib/supabaseClient'
 
 import Sidebar from './components/Sidebar'
@@ -170,8 +170,8 @@ function MainLayout() {
 
 export default function App() {
   return (
-    <BrowserRouter>
+    <Router>
       <MainLayout />
-    </BrowserRouter>
+    </Router>
   )
 }
