@@ -17,6 +17,10 @@ dist-ssr
 .env.*
 !.env.example
 
+# ─── Hardware credentials — JANGAN PERNAH di-commit! ───────
+# Salin config.h.example → config.h dan isi nilainya
+hardware/firmware/config.h
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

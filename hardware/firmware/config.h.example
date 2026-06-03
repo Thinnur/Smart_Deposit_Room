@@ -1,0 +1,26 @@
+// ============================================================
+//  config.h.example — Smart Safe Deposit Box
+//
+//  CARA PAKAI:
+//  1. Salin file ini: cp config.h.example config.h
+//  2. Isi nilai di bawah sesuai konfigurasi kamu
+//  3. JANGAN pernah commit config.h ke repository!
+//     (sudah ada di .gitignore)
+//
+//  Temukan Supabase URL & KEY di:
+//  Supabase Dashboard → Project Settings → API
+// ============================================================
+#pragma once
+
+// ── WiFi ────────────────────────────────────────────────────
+#define CFG_WIFI_SSID      "nama_wifi_kamu"
+#define CFG_WIFI_PASSWORD  "password_wifi_kamu"
+
+// ── Supabase ─────────────────────────────────────────────────
+#define CFG_SUPABASE_URL   "https://your-project-id.supabase.co"
+#define CFG_SUPABASE_KEY   "your-anon-key-here"
+
+// ── NTP / Timezone ───────────────────────────────────────────
+// GMT+7 untuk WIB (Waktu Indonesia Barat)
+#define CFG_NTP_SERVER     "pool.ntp.org"
+#define CFG_GMT_OFFSET     (7L * 3600L)
