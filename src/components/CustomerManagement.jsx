@@ -1,5 +1,23 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { supabase } from '../lib/supabaseClient'
+
+// ─── Helper ───────────────────────────────────────────────────────────────────
+const sendRefreshCache = async () => {
+  if (!supabase) return
+  try { await supabase.from('commands').insert({ type: 'REFRESH_CACHE', status: 'pending' }) } catch {}
+}
+
+function findNextFingerprintId(allNasabah, excludeId = null) {
+  const used = new Set(
+    allNasabah
+      .filter(n => n.id !== excludeId && n.fingerprint_id != null)
+      .map(n => n.fingerprint_id)
+  )
+  for (let i = 1; i <= 127; i++) {
+    if (!used.has(i)) return i
+  }
+  return null
+}
 
 // ─── Toast ────────────────────────────────────────────────────────────────────
 function Toast({ message, type, onClose }) {
@@ -33,8 +51,227 @@ function Toast({ message, type, onClose }) {
   )
 }
 
+// ─── Enrollment Dialog ────────────────────────────────────────────────────────
+function EnrollmentDialog({ type, nasabahId, fingerprintId, onClose, onSuccess }) {
+  const [progress, setProgress] = useState('Mengirim perintah ke alat...')
+  const [cmdStatus, setCmdStatus] = useState('sending')
+  const [cmdId, setCmdId] = useState(null)
+  const isRfid = type === 'ENROLL_RFID'
+  const resolvedRef = useRef(false)
+
+  useEffect(() => {
+    let active = true
+    let channel = null
+    let pollTimer = null
+
+    const handleResult = (resultType, value) => {
+      if (resolvedRef.current) return
+      resolvedRef.current = true
+      onSuccess(resultType, value)
+    }
+
+    const startEnroll = async () => {
+      const payload = isRfid
+        ? { nasabah_id: nasabahId }
+        : { nasabah_id: nasabahId, fingerprint_id: fingerprintId }
+
+      const { data, error } = await supabase
+        .from('commands')
+        .insert({ type, status: 'pending', payload })
+        .select('id')
+        .single()
+
+      if (!active) return
+      if (error || !data) {
+        setProgress('Gagal mengirim perintah ke alat.')
+        setCmdStatus('error')
+        return
+      }
+
+      const id = data.id
+      setCmdId(id)
+      setCmdStatus('pending')
+      setProgress('Menunggu alat merespon... (polling setiap 5 detik)')
+
+      // Realtime subscription
+      channel = supabase
+        .channel(`enroll-${id}`)
+        .on('postgres_changes', {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'commands',
+          filter: `id=eq.${id}`,
+        }, ({ new: updated }) => {
+          if (!active) return
+          const prog = updated.payload?.progress || ''
+          if (prog) setProgress(prog)
+          const st = updated.status
+          setCmdStatus(st === 'pending' ? 'progress' : st)
+          if (st === 'done') {
+            if (isRfid) handleResult('rfid', updated.payload?.rfid_uid || '')
+            else handleResult('fp', updated.payload?.fingerprint_id)
+          }
+        })
+        .subscribe()
+
+      // Polling fallback every 3s
+      pollTimer = setInterval(async () => {
+        if (!active || resolvedRef.current) return
+        const { data: row } = await supabase
+          .from('commands')
+          .select('status, payload')
+          .eq('id', id)
+          .single()
+        if (!row || !active) return
+        const prog = row.payload?.progress || ''
+        if (prog) setProgress(prog)
+        const st = row.status
+        if (st !== 'pending') setCmdStatus(st)
+        if (st === 'done') {
+          clearInterval(pollTimer)
+          if (isRfid) handleResult('rfid', row.payload?.rfid_uid || '')
+          else handleResult('fp', row.payload?.fingerprint_id)
+        } else if (st === 'error') {
+          clearInterval(pollTimer)
+        } else if (st === 'cancelled') {
+          clearInterval(pollTimer)
+          if (active) onClose()
+        }
+      }, 3000)
+    }
+
+    startEnroll()
+
+    return () => {
+      active = false
+      if (channel) supabase.removeChannel(channel)
+      if (pollTimer) clearInterval(pollTimer)
+    }
+  }, [])
+
+  const handleCancel = async () => {
+    if (cmdId && cmdStatus !== 'done' && cmdStatus !== 'error') {
+      try { await supabase.from('commands').update({ status: 'cancelled' }).eq('id', cmdId) } catch {}
+    }
+    onClose()
+  }
+
+  const isDone  = cmdStatus === 'done'
+  const isError = cmdStatus === 'error'
+  const isActive = !isDone && !isError
+
+  const statusColor = isDone ? '#4ade80' : isError ? '#f87171' : '#60a5fa'
+  const statusIcon  = isDone ? 'check_circle' : isError ? 'error' : 'sensors'
+
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 2000,
+      background: 'rgba(0,0,0,0.65)', backdropFilter: 'blur(8px)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      padding: '16px',
+    }}>
+      <div className="glass-card animate-fade-in" style={{ width: '100%', maxWidth: '420px', padding: '28px' }}>
+        {/* Header */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '24px' }}>
+          <div style={{
+            width: '44px', height: '44px', borderRadius: '12px', flexShrink: 0,
+            background: isRfid
+              ? 'linear-gradient(135deg,#3b82f6,#1d4ed8)'
+              : 'linear-gradient(135deg,#8b5cf6,#6d28d9)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}>
+            <span className="material-symbols-outlined" style={{ color: 'white', fontSize: '22px' }}>
+              {isRfid ? 'nfc' : 'fingerprint'}
+            </span>
+          </div>
+          <div>
+            <h2 style={{ fontSize: '16px', fontWeight: 700, color: 'var(--text-primary)', margin: 0 }}>
+              {isRfid ? 'Pendaftaran RFID' : 'Pendaftaran Sidik Jari'}
+            </h2>
+            <p style={{ fontSize: '12px', color: 'var(--text-muted)', margin: 0 }}>
+              {isRfid ? 'Scan kartu via sensor alat' : `Slot ID #${fingerprintId}`}
+            </p>
+          </div>
+        </div>
+
+        {/* Status indicator */}
+        <div style={{
+          padding: '18px', borderRadius: '12px',
+          background: 'var(--bg-body)',
+          border: `1px solid ${statusColor}44`,
+          marginBottom: '20px',
+          display: 'flex', alignItems: 'flex-start', gap: '12px',
+        }}>
+          <span className="material-symbols-outlined" style={{
+            color: statusColor, fontSize: '22px', flexShrink: 0,
+            animation: isActive ? 'pulse-icon 1.5s ease-in-out infinite' : 'none',
+          }}>
+            {statusIcon}
+          </span>
+          <div style={{ flex: 1 }}>
+            <p style={{ fontSize: '13.5px', color: 'var(--text-primary)', fontWeight: 600, margin: '0 0 4px' }}>
+              {isDone ? 'Pendaftaran Berhasil!' : isError ? 'Pendaftaran Gagal' : 'Proses Pendaftaran...'}
+            </p>
+            <p style={{ fontSize: '12.5px', color: 'var(--text-muted)', margin: 0, lineHeight: 1.5 }}>
+              {progress}
+            </p>
+          </div>
+        </div>
+
+        {/* Step guide (FP only) */}
+        {!isRfid && isActive && (
+          <div style={{ display: 'flex', gap: '8px', marginBottom: '20px' }}>
+            {['Tempel Jari 1', 'Angkat Jari', 'Tempel Jari 2'].map((label, i) => (
+              <div key={i} style={{ flex: 1, textAlign: 'center' }}>
+                <div style={{
+                  height: '3px', borderRadius: '2px',
+                  background: 'rgba(139,92,246,0.25)',
+                  marginBottom: '5px',
+                }} />
+                <span style={{ fontSize: '10px', color: 'var(--text-subtle)' }}>{label}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Actions */}
+        <div style={{ display: 'flex', gap: '10px' }}>
+          {!isDone && (
+            <button
+              onClick={handleCancel}
+              style={{
+                flex: 1, padding: '10px', borderRadius: '10px',
+                border: '1px solid var(--border-card)', background: 'transparent',
+                color: 'var(--text-secondary)', fontSize: '13.5px', fontWeight: 600,
+                cursor: 'pointer', fontFamily: 'var(--font-sans)',
+              }}
+            >
+              {isError ? 'Tutup' : 'Batal'}
+            </button>
+          )}
+          {isDone && (
+            <button
+              onClick={onClose}
+              style={{
+                flex: 1, padding: '10px', borderRadius: '10px',
+                border: 'none',
+                background: 'linear-gradient(135deg,#22c55e,#15803d)',
+                color: 'white', fontSize: '13.5px', fontWeight: 600,
+                cursor: 'pointer', fontFamily: 'var(--font-sans)',
+                boxShadow: '0 4px 14px rgba(34,197,94,0.35)',
+              }}
+            >
+              Selesai
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ─── Modal Form ───────────────────────────────────────────────────────────────
-function NasabahModal({ onClose, onSuccess, editData }) {
+function NasabahModal({ onClose, onSuccess, editData, allNasabah }) {
   const isEdit = !!editData
   const [form, setForm] = useState({
     nama: editData?.nama || '',
@@ -45,6 +282,12 @@ function NasabahModal({ onClose, onSuccess, editData }) {
   const [availableLokers, setAvailableLokers] = useState([])
   const [loading, setLoading] = useState(false)
   const [fetchingLokers, setFetchingLokers] = useState(true)
+  const [enrollDialog, setEnrollDialog] = useState(null)
+  // nasabah baru yang baru saja di-insert — mengaktifkan tombol scan tanpa menutup modal
+  const [savedNasabah, setSavedNasabah] = useState(null)
+
+  const canScan    = isEdit || !!savedNasabah
+  const enrollId   = editData?.id || savedNasabah?.id
 
   useEffect(() => {
     const fetchLokers = async () => {
@@ -98,14 +341,34 @@ function NasabahModal({ onClose, onSuccess, editData }) {
             .eq('id', selectedLoker)
           if (lokerErr) throw lokerErr
         }
+        await sendRefreshCache()
+        // Jangan tutup modal — switch ke mode scan sensor
+        setSavedNasabah(inserted)
+        setLoading(false)
+        return
       }
-      onSuccess(isEdit ? 'Data nasabah berhasil diperbarui.' : 'Nasabah berhasil ditambahkan.')
+      await sendRefreshCache()
+      onSuccess('Data nasabah berhasil diperbarui.')
     } catch (err) {
       console.error(err)
       onSuccess('Terjadi kesalahan: ' + (err.message || 'Unknown error'), 'error')
     } finally {
       setLoading(false)
     }
+  }
+
+  const openRfidEnroll = () => {
+    setEnrollDialog({ type: 'ENROLL_RFID', nasabahId: enrollId, fpTargetId: null })
+  }
+
+  const openFpEnroll = () => {
+    const currentFpId = form.fingerprint_id !== '' ? parseInt(form.fingerprint_id) : null
+    const fpTargetId = currentFpId || findNextFingerprintId(allNasabah, enrollId)
+    if (!fpTargetId) {
+      alert('Semua slot sidik jari (1-127) sudah terisi.')
+      return
+    }
+    setEnrollDialog({ type: 'ENROLL_FP', nasabahId: enrollId, fpTargetId })
   }
 
   const inputStyle = {
@@ -117,86 +380,184 @@ function NasabahModal({ onClose, onSuccess, editData }) {
     fontFamily: 'var(--font-sans)',
   }
   const labelStyle = { fontSize: '12px', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '6px', display: 'block', textTransform: 'uppercase', letterSpacing: '0.06em' }
+  const scanBtnStyle = {
+    padding: '9px 11px', borderRadius: '9px', border: '1px solid var(--border-card)',
+    background: 'var(--bg-body)', color: 'var(--text-muted)',
+    cursor: 'pointer', display: 'flex', alignItems: 'center', flexShrink: 0,
+    transition: 'all 0.15s ease',
+  }
 
   return (
-    <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="glass-card animate-fade-in" style={{ width: '100%', maxWidth: '460px', padding: '28px', margin: '16px' }}>
-        {/* Header */}
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '24px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-            <div style={{ width: '36px', height: '36px', borderRadius: '10px', background: 'linear-gradient(135deg,#3b82f6,#1d4ed8)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <span className="material-symbols-outlined" style={{ color: 'white', fontSize: '18px' }}>{isEdit ? 'edit' : 'person_add'}</span>
+    <>
+      <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
+        <div className="glass-card animate-fade-in" style={{ width: '100%', maxWidth: '480px', padding: '28px', margin: '16px' }}>
+          {/* Header */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '24px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <div style={{ width: '36px', height: '36px', borderRadius: '10px', background: savedNasabah ? 'linear-gradient(135deg,#22c55e,#15803d)' : 'linear-gradient(135deg,#3b82f6,#1d4ed8)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <span className="material-symbols-outlined" style={{ color: 'white', fontSize: '18px' }}>{savedNasabah ? 'check_circle' : isEdit ? 'edit' : 'person_add'}</span>
+              </div>
+              <div>
+                <h2 style={{ fontSize: '16px', fontWeight: 700, color: 'var(--text-primary)', margin: 0 }}>
+                  {savedNasabah ? 'Nasabah Ditambahkan!' : isEdit ? 'Edit Nasabah' : 'Tambah Nasabah'}
+                </h2>
+                <p style={{ fontSize: '12px', color: 'var(--text-muted)', margin: 0 }}>
+                  {savedNasabah ? 'Daftarkan sensor (opsional), lalu klik Selesai' : isEdit ? 'Perbarui data nasabah' : 'Isi data nasabah baru'}
+                </p>
+              </div>
             </div>
-            <div>
-              <h2 style={{ fontSize: '16px', fontWeight: 700, color: 'var(--text-primary)', margin: 0 }}>{isEdit ? 'Edit Nasabah' : 'Tambah Nasabah'}</h2>
-              <p style={{ fontSize: '12px', color: 'var(--text-muted)', margin: 0 }}>{isEdit ? 'Perbarui data nasabah' : 'Isi data nasabah baru'}</p>
-            </div>
-          </div>
-          <button onClick={onClose} className="topbar-btn"><span className="material-symbols-outlined" style={{ fontSize: '20px' }}>close</span></button>
-        </div>
-
-        <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-          <div>
-            <label style={labelStyle}>Nama Lengkap *</label>
-            <input name="nama" value={form.nama} onChange={handleChange} required placeholder="Masukkan nama nasabah" style={inputStyle} />
-          </div>
-          <div>
-            <label style={labelStyle}>UID RFID</label>
-            <input name="rfid_uid" value={form.rfid_uid} onChange={handleChange} placeholder="Contoh: A3F2B1C4" style={inputStyle} />
-          </div>
-          <div>
-            <label style={labelStyle}>ID Fingerprint</label>
-            <input name="fingerprint_id" type="number" value={form.fingerprint_id} onChange={handleChange} placeholder="Nomor ID fingerprint" style={inputStyle} />
+            <button onClick={onClose} className="topbar-btn"><span className="material-symbols-outlined" style={{ fontSize: '20px' }}>close</span></button>
           </div>
 
-          {!isEdit && (
+          <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
             <div>
-              <label style={labelStyle}>Alokasi Loker (Opsional)</label>
-              <select
-                value={selectedLoker}
-                onChange={(e) => setSelectedLoker(e.target.value)}
-                style={{ ...inputStyle, cursor: 'pointer' }}
-                disabled={fetchingLokers}
-              >
-                <option value="">{fetchingLokers ? 'Memuat loker...' : '— Pilih loker tersedia —'}</option>
-                {availableLokers.map(l => (
-                  <option key={l.id} value={l.id}>Loker #{l.nomor_loker}</option>
-                ))}
-              </select>
-              {!fetchingLokers && availableLokers.length === 0 && (
-                <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '5px' }}>Tidak ada loker yang tersedia saat ini.</p>
+              <label style={labelStyle}>Nama Lengkap *</label>
+              <input name="nama" value={form.nama} onChange={handleChange} required placeholder="Masukkan nama nasabah" style={inputStyle} />
+            </div>
+
+            {/* RFID + scan button */}
+            <div>
+              <label style={labelStyle}>UID RFID</label>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <input name="rfid_uid" value={form.rfid_uid} onChange={handleChange} placeholder="Contoh: A3F2B1C4" style={{ ...inputStyle, flex: 1 }} />
+                {canScan && (
+                  <button
+                    type="button"
+                    onClick={openRfidEnroll}
+                    title="Scan RFID via alat"
+                    style={scanBtnStyle}
+                    onMouseOver={e => { e.currentTarget.style.borderColor = '#3b82f6'; e.currentTarget.style.color = '#60a5fa' }}
+                    onMouseOut={e => { e.currentTarget.style.borderColor = 'var(--border-card)'; e.currentTarget.style.color = 'var(--text-muted)' }}
+                  >
+                    <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>nfc</span>
+                  </button>
+                )}
+              </div>
+              {canScan && (
+                <p style={{ fontSize: '11px', color: 'var(--text-subtle)', marginTop: '5px' }}>
+                  Klik ikon NFC untuk mendaftarkan kartu langsung dari sensor alat.
+                </p>
               )}
             </div>
-          )}
 
-          <div style={{ display: 'flex', gap: '10px', marginTop: '8px' }}>
-            <button type="button" onClick={onClose} style={{
-              flex: 1, padding: '10px', borderRadius: '10px',
-              border: '1px solid var(--border-card)', background: 'transparent',
-              color: 'var(--text-secondary)', fontSize: '13.5px', fontWeight: 600,
-              cursor: 'pointer', fontFamily: 'var(--font-sans)',
-            }}>Batal</button>
-            <button type="submit" disabled={loading} style={{
-              flex: 1, padding: '10px', borderRadius: '10px',
-              border: 'none', background: 'linear-gradient(135deg,#3b82f6,#1d4ed8)',
-              color: 'white', fontSize: '13.5px', fontWeight: 600,
-              cursor: loading ? 'not-allowed' : 'pointer',
-              opacity: loading ? 0.75 : 1,
-              fontFamily: 'var(--font-sans)',
-              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px',
-              boxShadow: '0 4px 14px rgba(59,130,246,0.35)',
-            }}>
-              {loading && <span className="material-symbols-outlined" style={{ fontSize: '16px', animation: 'bounce-dot 0.8s ease-in-out infinite' }}>sync</span>}
-              {loading ? 'Menyimpan...' : (isEdit ? 'Simpan Perubahan' : 'Tambah Nasabah')}
-            </button>
-          </div>
-        </form>
+            {/* Fingerprint + scan button */}
+            <div>
+              <label style={labelStyle}>ID Fingerprint</label>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <input
+                  name="fingerprint_id"
+                  type="number"
+                  value={form.fingerprint_id}
+                  onChange={handleChange}
+                  placeholder="Nomor ID fingerprint (1-127)"
+                  style={{ ...inputStyle, flex: 1 }}
+                />
+                {canScan && (
+                  <button
+                    type="button"
+                    onClick={openFpEnroll}
+                    title="Daftarkan sidik jari via alat"
+                    style={scanBtnStyle}
+                    onMouseOver={e => { e.currentTarget.style.borderColor = '#8b5cf6'; e.currentTarget.style.color = '#c084fc' }}
+                    onMouseOut={e => { e.currentTarget.style.borderColor = 'var(--border-card)'; e.currentTarget.style.color = 'var(--text-muted)' }}
+                  >
+                    <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>fingerprint</span>
+                  </button>
+                )}
+              </div>
+              {canScan && (
+                <p style={{ fontSize: '11px', color: 'var(--text-subtle)', marginTop: '5px' }}>
+                  Klik ikon sidik jari untuk mendaftarkan langsung dari sensor alat.
+                </p>
+              )}
+            </div>
+
+            {!isEdit && !savedNasabah && (
+              <div>
+                <label style={labelStyle}>Alokasi Loker (Opsional)</label>
+                <select
+                  value={selectedLoker}
+                  onChange={(e) => setSelectedLoker(e.target.value)}
+                  style={{ ...inputStyle, cursor: 'pointer' }}
+                  disabled={fetchingLokers}
+                >
+                  <option value="">{fetchingLokers ? 'Memuat loker...' : '— Pilih loker tersedia —'}</option>
+                  {availableLokers.map(l => (
+                    <option key={l.id} value={l.id}>Loker #{l.nomor_loker}</option>
+                  ))}
+                </select>
+                {!fetchingLokers && availableLokers.length === 0 && (
+                  <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '5px' }}>Tidak ada loker yang tersedia saat ini.</p>
+                )}
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: '10px', marginTop: '8px' }}>
+              <button type="button" onClick={onClose} style={{
+                flex: 1, padding: '10px', borderRadius: '10px',
+                border: '1px solid var(--border-card)', background: 'transparent',
+                color: 'var(--text-secondary)', fontSize: '13.5px', fontWeight: 600,
+                cursor: 'pointer', fontFamily: 'var(--font-sans)',
+              }}>{savedNasabah ? 'Lewati' : 'Batal'}</button>
+
+              {savedNasabah ? (
+                <button
+                  type="button"
+                  onClick={() => onSuccess('Nasabah berhasil ditambahkan.')}
+                  style={{
+                    flex: 1, padding: '10px', borderRadius: '10px',
+                    border: 'none', background: 'linear-gradient(135deg,#22c55e,#15803d)',
+                    color: 'white', fontSize: '13.5px', fontWeight: 600,
+                    cursor: 'pointer', fontFamily: 'var(--font-sans)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px',
+                    boxShadow: '0 4px 14px rgba(34,197,94,0.35)',
+                  }}
+                >
+                  <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>check</span>
+                  Selesai
+                </button>
+              ) : (
+                <button type="submit" disabled={loading} style={{
+                  flex: 1, padding: '10px', borderRadius: '10px',
+                  border: 'none', background: 'linear-gradient(135deg,#3b82f6,#1d4ed8)',
+                  color: 'white', fontSize: '13.5px', fontWeight: 600,
+                  cursor: loading ? 'not-allowed' : 'pointer',
+                  opacity: loading ? 0.75 : 1,
+                  fontFamily: 'var(--font-sans)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px',
+                  boxShadow: '0 4px 14px rgba(59,130,246,0.35)',
+                }}>
+                  {loading && <span className="material-symbols-outlined" style={{ fontSize: '16px', animation: 'bounce-dot 0.8s ease-in-out infinite' }}>sync</span>}
+                  {loading ? 'Menyimpan...' : (isEdit ? 'Simpan Perubahan' : 'Tambah Nasabah')}
+                </button>
+              )}
+            </div>
+          </form>
+        </div>
       </div>
-    </div>
+
+      {/* Enrollment dialog — rendered above modal */}
+      {enrollDialog && (
+        <EnrollmentDialog
+          type={enrollDialog.type}
+          nasabahId={enrollDialog.nasabahId}
+          fingerprintId={enrollDialog.fpTargetId}
+          onClose={() => setEnrollDialog(null)}
+          onSuccess={(resultType, value) => {
+            if (resultType === 'rfid') {
+              setForm(f => ({ ...f, rfid_uid: value || '' }))
+            } else {
+              setForm(f => ({ ...f, fingerprint_id: value ?? '' }))
+            }
+            setEnrollDialog(null)
+          }}
+        />
+      )}
+    </>
   )
 }
 
-// ─── Empty State ──────────────────────────────────────────────────────────────
+// ─── Loker Modal ──────────────────────────────────────────────────────────────
 function LokerModal({ onClose, onSuccess }) {
   const [nomorLoker, setNomorLoker] = useState('')
   const [loading, setLoading] = useState(false)
@@ -213,6 +574,7 @@ function LokerModal({ onClose, onSuccess }) {
         .insert([{ nomor_loker: trimmedNomor, id_nasabah: null }])
 
       if (error) throw error
+      await sendRefreshCache()
       onSuccess(`Loker "${trimmedNomor}" berhasil ditambahkan.`)
     } catch (err) {
       console.error(err)
@@ -281,6 +643,7 @@ function LokerModal({ onClose, onSuccess }) {
   )
 }
 
+// ─── Empty State ──────────────────────────────────────────────────────────────
 function EmptyState({ onAdd }) {
   return (
     <tr>
@@ -298,7 +661,6 @@ function EmptyState({ onAdd }) {
   )
 }
 
-// ─── Main Page ────────────────────────────────────────────────────────────────
 function EmptyLokerState({ onAdd }) {
   return (
     <tr>
@@ -316,6 +678,7 @@ function EmptyLokerState({ onAdd }) {
   )
 }
 
+// ─── Main Page ────────────────────────────────────────────────────────────────
 export default function CustomerManagement() {
   const [nasabahList, setNasabahList]   = useState([])
   const [lokerList, setLokerList]       = useState([])
@@ -367,10 +730,7 @@ export default function CustomerManagement() {
   useEffect(() => {
     let active = true
     Promise.resolve().then(() => {
-      if (active) {
-        fetchNasabah()
-        fetchLokers()
-      }
+      if (active) { fetchNasabah(); fetchLokers() }
     })
     return () => { active = false }
   }, [fetchNasabah, fetchLokers])
@@ -378,12 +738,12 @@ export default function CustomerManagement() {
   const handleDelete = async (nasabah) => {
     if (!window.confirm(`Hapus nasabah "${nasabah.nama}"?\nSemua data terkait akan dihapus.`)) return
     try {
-      // Unassign locker first (set id_nasabah to null)
       if (nasabah.loker?.length > 0) {
         await supabase.from('loker').update({ id_nasabah: null }).eq('id_nasabah', nasabah.id)
       }
       const { error } = await supabase.from('nasabah').delete().eq('id', nasabah.id)
       if (error) throw error
+      await sendRefreshCache()
       showToast(`Nasabah "${nasabah.nama}" berhasil dihapus.`)
       fetchNasabah()
       fetchLokers()
@@ -396,19 +756,13 @@ export default function CustomerManagement() {
     setShowModal(false)
     setEditTarget(null)
     showToast(msg, type)
-    if (type === 'success') {
-      fetchNasabah()
-      fetchLokers()
-    }
+    if (type === 'success') { fetchNasabah(); fetchLokers() }
   }
 
   const handleLokerModalSuccess = (msg, type = 'success') => {
     setShowLokerModal(false)
     showToast(msg, type)
-    if (type === 'success') {
-      fetchLokers()
-      fetchNasabah()
-    }
+    if (type === 'success') { fetchLokers(); fetchNasabah() }
   }
 
   const handleDeleteLoker = async (loker) => {
@@ -416,16 +770,16 @@ export default function CustomerManagement() {
     try {
       const { error } = await supabase.from('loker').delete().eq('id', loker.id)
       if (error) throw error
+      await sendRefreshCache()
       showToast(`Loker "${loker.nomor_loker}" berhasil dihapus.`)
-      fetchLokers()
-      fetchNasabah()
+      fetchLokers(); fetchNasabah()
     } catch (err) {
       showToast('Gagal menghapus loker: ' + (err.message || 'Unknown error'), 'error')
     }
   }
 
-  const openEdit = (nasabah) => { setEditTarget(nasabah); setShowModal(true) }
-  const openAdd  = () => { setEditTarget(null); setShowModal(true) }
+  const openEdit    = (nasabah) => { setEditTarget(nasabah); setShowModal(true) }
+  const openAdd     = () => { setEditTarget(null); setShowModal(true) }
   const openAddLoker = () => setShowLokerModal(true)
 
   const filtered = nasabahList.filter(n =>
@@ -433,7 +787,6 @@ export default function CustomerManagement() {
     n.rfid_uid?.toLowerCase().includes(searchQuery.toLowerCase())
   )
 
-  // ── Skeleton rows
   const SkeletonRow = ({ columns = 5 }) => (
     <tr>
       {Array.from({ length: columns }).map((_, i) => (
@@ -473,7 +826,7 @@ export default function CustomerManagement() {
         )}
       </div>
 
-      {/* ── Card */}
+      {/* ── Tabs */}
       <div style={{ display: 'inline-flex', padding: '4px', borderRadius: '12px', background: 'var(--bg-card)', border: '1px solid var(--border-card)', marginBottom: '16px', gap: '4px' }}>
         {[
           { id: 'nasabah', label: 'Data Nasabah', icon: 'group' },
@@ -505,163 +858,154 @@ export default function CustomerManagement() {
       <div className="glass-card" style={{ overflow: 'hidden' }}>
         {activeTab === 'nasabah' ? (
           <>
-        {/* Toolbar */}
-        <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--border-table)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <span className="material-symbols-outlined" style={{ fontSize: '18px', color: '#3b82f6' }}>group</span>
-            <span style={{ fontSize: '14px', fontWeight: 700, color: 'var(--text-primary)' }}>Daftar Nasabah</span>
-            {!loading && (
-              <span style={{ padding: '2px 9px', borderRadius: '99px', background: 'rgba(59,130,246,0.12)', border: '1px solid rgba(59,130,246,0.25)', fontSize: '11.5px', fontWeight: 700, color: '#60a5fa' }}>
-                {filtered.length}
-              </span>
+            <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--border-table)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span className="material-symbols-outlined" style={{ fontSize: '18px', color: '#3b82f6' }}>group</span>
+                <span style={{ fontSize: '14px', fontWeight: 700, color: 'var(--text-primary)' }}>Daftar Nasabah</span>
+                {!loading && (
+                  <span style={{ padding: '2px 9px', borderRadius: '99px', background: 'rgba(59,130,246,0.12)', border: '1px solid rgba(59,130,246,0.25)', fontSize: '11.5px', fontWeight: 700, color: '#60a5fa' }}>
+                    {filtered.length}
+                  </span>
+                )}
+              </div>
+              <div style={{ position: 'relative' }}>
+                <span className="material-symbols-outlined" style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', fontSize: '16px', color: 'var(--text-muted)', pointerEvents: 'none' }}>search</span>
+                <input
+                  value={searchQuery}
+                  onChange={e => setSearchQuery(e.target.value)}
+                  placeholder="Cari nama / RFID..."
+                  style={{
+                    padding: '8px 12px 8px 34px',
+                    background: 'var(--bg-body)', border: '1px solid var(--border-card)',
+                    borderRadius: '9px', color: 'var(--text-primary)', fontSize: '13px',
+                    outline: 'none', width: '220px', fontFamily: 'var(--font-sans)',
+                  }}
+                />
+              </div>
+            </div>
+
+            <div style={{ overflowX: 'auto' }}>
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th style={{ width: '40%' }}>Nama</th>
+                    <th>UID RFID</th>
+                    <th>ID Fingerprint</th>
+                    <th>Loker</th>
+                    <th style={{ textAlign: 'right' }}>Aksi</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {loading ? (
+                    Array.from({ length: 5 }).map((_, i) => <SkeletonRow key={i} />)
+                  ) : filtered.length === 0 ? (
+                    <EmptyState onAdd={openAdd} />
+                  ) : (
+                    filtered.map(n => {
+                      const nLokerList = n.loker || []
+                      return (
+                        <tr key={n.id}>
+                          <td>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                              <div style={{
+                                width: '34px', height: '34px', borderRadius: '50%', flexShrink: 0,
+                                background: 'linear-gradient(135deg,#3b82f6,#8b5cf6)',
+                                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                fontSize: '13px', fontWeight: 700, color: 'white',
+                              }}>
+                                {n.nama?.charAt(0).toUpperCase() || '?'}
+                              </div>
+                              <div>
+                                <p style={{ margin: 0, fontWeight: 600, color: 'var(--text-primary)', fontSize: '13.5px' }}>{n.nama}</p>
+                                <p style={{ margin: 0, fontSize: '11.5px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>{n.id.slice(0, 8)}…</p>
+                              </div>
+                            </div>
+                          </td>
+                          <td>
+                            {n.rfid_uid
+                              ? <span style={{ fontFamily: 'var(--font-mono)', fontSize: '12.5px', padding: '3px 8px', borderRadius: '6px', background: 'rgba(59,130,246,0.08)', border: '1px solid rgba(59,130,246,0.2)', color: '#60a5fa' }}>{n.rfid_uid}</span>
+                              : <span style={{ color: 'var(--text-subtle)', fontSize: '12px' }}>—</span>}
+                          </td>
+                          <td>
+                            {n.fingerprint_id != null
+                              ? <span style={{ fontFamily: 'var(--font-mono)', fontSize: '12.5px', padding: '3px 8px', borderRadius: '6px', background: 'rgba(168,85,247,0.08)', border: '1px solid rgba(168,85,247,0.2)', color: '#c084fc' }}>#{n.fingerprint_id}</span>
+                              : <span style={{ color: 'var(--text-subtle)', fontSize: '12px' }}>—</span>}
+                          </td>
+                          <td>
+                            {nLokerList.length > 0
+                              ? nLokerList.map(l => (
+                                <span key={l.id} className="badge badge-success" style={{ marginRight: '4px' }}>
+                                  <span className="material-symbols-outlined" style={{ fontSize: '13px' }}>lock</span>
+                                  #{l.nomor_loker}
+                                </span>
+                              ))
+                              : <span className="badge badge-warning">
+                                  <span className="material-symbols-outlined" style={{ fontSize: '13px' }}>lock_open</span>
+                                  Belum ada
+                                </span>
+                            }
+                          </td>
+                          <td style={{ textAlign: 'right' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '6px' }}>
+                              <button
+                                onClick={() => openEdit(n)}
+                                title="Edit"
+                                style={{
+                                  display: 'flex', alignItems: 'center', gap: '5px',
+                                  padding: '6px 12px', borderRadius: '8px',
+                                  border: '1px solid var(--border-card)',
+                                  background: 'transparent', color: 'var(--text-muted)',
+                                  fontSize: '12.5px', fontWeight: 600, cursor: 'pointer',
+                                  fontFamily: 'var(--font-sans)', transition: 'all 0.15s ease',
+                                }}
+                                onMouseOver={e => { e.currentTarget.style.borderColor = '#3b82f6'; e.currentTarget.style.color = '#60a5fa' }}
+                                onMouseOut={e => { e.currentTarget.style.borderColor = 'var(--border-card)'; e.currentTarget.style.color = 'var(--text-muted)' }}
+                              >
+                                <span className="material-symbols-outlined" style={{ fontSize: '14px' }}>edit</span>
+                                Edit
+                              </button>
+                              <button
+                                onClick={() => handleDelete(n)}
+                                title="Hapus"
+                                style={{
+                                  display: 'flex', alignItems: 'center', gap: '5px',
+                                  padding: '6px 12px', borderRadius: '8px',
+                                  border: '1px solid rgba(239,68,68,0.25)',
+                                  background: 'rgba(239,68,68,0.06)', color: '#f87171',
+                                  fontSize: '12.5px', fontWeight: 600, cursor: 'pointer',
+                                  fontFamily: 'var(--font-sans)', transition: 'all 0.15s ease',
+                                }}
+                                onMouseOver={e => { e.currentTarget.style.background = 'rgba(239,68,68,0.14)' }}
+                                onMouseOut={e => { e.currentTarget.style.background = 'rgba(239,68,68,0.06)' }}
+                              >
+                                <span className="material-symbols-outlined" style={{ fontSize: '14px' }}>delete</span>
+                                Hapus
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      )
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            {!loading && filtered.length > 0 && (
+              <div style={{ padding: '12px 20px', borderTop: '1px solid var(--border-table)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <p style={{ fontSize: '12px', color: 'var(--text-muted)', margin: 0 }}>
+                  Menampilkan <strong style={{ color: 'var(--text-secondary)' }}>{filtered.length}</strong> dari <strong style={{ color: 'var(--text-secondary)' }}>{nasabahList.length}</strong> nasabah
+                </p>
+                <button onClick={fetchNasabah} style={{
+                  display: 'flex', alignItems: 'center', gap: '5px',
+                  background: 'none', border: 'none', color: 'var(--text-muted)',
+                  fontSize: '12px', cursor: 'pointer', fontFamily: 'var(--font-sans)',
+                }}>
+                  <span className="material-symbols-outlined" style={{ fontSize: '14px' }}>refresh</span>
+                  Refresh
+                </button>
+              </div>
             )}
-          </div>
-          {/* Search */}
-          <div style={{ position: 'relative' }}>
-            <span className="material-symbols-outlined" style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', fontSize: '16px', color: 'var(--text-muted)', pointerEvents: 'none' }}>search</span>
-            <input
-              value={searchQuery}
-              onChange={e => setSearchQuery(e.target.value)}
-              placeholder="Cari nama / RFID..."
-              style={{
-                padding: '8px 12px 8px 34px',
-                background: 'var(--bg-body)', border: '1px solid var(--border-card)',
-                borderRadius: '9px', color: 'var(--text-primary)', fontSize: '13px',
-                outline: 'none', width: '220px', fontFamily: 'var(--font-sans)',
-              }}
-            />
-          </div>
-        </div>
-
-        {/* Table */}
-        <div style={{ overflowX: 'auto' }}>
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th style={{ width: '40%' }}>Nama</th>
-                <th>UID RFID</th>
-                <th>ID Fingerprint</th>
-                <th>Loker</th>
-                <th style={{ textAlign: 'right' }}>Aksi</th>
-              </tr>
-            </thead>
-            <tbody>
-              {loading ? (
-                Array.from({ length: 5 }).map((_, i) => <SkeletonRow key={i} />)
-              ) : filtered.length === 0 ? (
-                <EmptyState onAdd={openAdd} />
-              ) : (
-                filtered.map(n => {
-                  const lokerList = n.loker || []
-                  return (
-                    <tr key={n.id}>
-                      {/* Nama */}
-                      <td>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                          <div style={{
-                            width: '34px', height: '34px', borderRadius: '50%', flexShrink: 0,
-                            background: 'linear-gradient(135deg,#3b82f6,#8b5cf6)',
-                            display: 'flex', alignItems: 'center', justifyContent: 'center',
-                            fontSize: '13px', fontWeight: 700, color: 'white',
-                          }}>
-                            {n.nama?.charAt(0).toUpperCase() || '?'}
-                          </div>
-                          <div>
-                            <p style={{ margin: 0, fontWeight: 600, color: 'var(--text-primary)', fontSize: '13.5px' }}>{n.nama}</p>
-                            <p style={{ margin: 0, fontSize: '11.5px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>{n.id.slice(0, 8)}…</p>
-                          </div>
-                        </div>
-                      </td>
-                      {/* RFID */}
-                      <td>
-                        {n.rfid_uid
-                          ? <span style={{ fontFamily: 'var(--font-mono)', fontSize: '12.5px', padding: '3px 8px', borderRadius: '6px', background: 'rgba(59,130,246,0.08)', border: '1px solid rgba(59,130,246,0.2)', color: '#60a5fa' }}>{n.rfid_uid}</span>
-                          : <span style={{ color: 'var(--text-subtle)', fontSize: '12px' }}>—</span>}
-                      </td>
-                      {/* Fingerprint */}
-                      <td>
-                        {n.fingerprint_id != null
-                          ? <span style={{ fontFamily: 'var(--font-mono)', fontSize: '12.5px', padding: '3px 8px', borderRadius: '6px', background: 'rgba(168,85,247,0.08)', border: '1px solid rgba(168,85,247,0.2)', color: '#c084fc' }}>#{n.fingerprint_id}</span>
-                          : <span style={{ color: 'var(--text-subtle)', fontSize: '12px' }}>—</span>}
-                      </td>
-                      {/* Loker */}
-                      <td>
-                        {lokerList.length > 0
-                          ? lokerList.map(l => (
-                            <span key={l.id} className="badge badge-success" style={{ marginRight: '4px' }}>
-                              <span className="material-symbols-outlined" style={{ fontSize: '13px' }}>lock</span>
-                              #{l.nomor_loker}
-                            </span>
-                          ))
-                          : <span className="badge badge-warning">
-                              <span className="material-symbols-outlined" style={{ fontSize: '13px' }}>lock_open</span>
-                              Belum ada
-                            </span>
-                        }
-                      </td>
-                      {/* Aksi */}
-                      <td style={{ textAlign: 'right' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '6px' }}>
-                          <button
-                            onClick={() => openEdit(n)}
-                            title="Edit"
-                            style={{
-                              display: 'flex', alignItems: 'center', gap: '5px',
-                              padding: '6px 12px', borderRadius: '8px',
-                              border: '1px solid var(--border-card)',
-                              background: 'transparent', color: 'var(--text-muted)',
-                              fontSize: '12.5px', fontWeight: 600, cursor: 'pointer',
-                              fontFamily: 'var(--font-sans)', transition: 'all 0.15s ease',
-                            }}
-                            onMouseOver={e => { e.currentTarget.style.borderColor = '#3b82f6'; e.currentTarget.style.color = '#60a5fa' }}
-                            onMouseOut={e => { e.currentTarget.style.borderColor = 'var(--border-card)'; e.currentTarget.style.color = 'var(--text-muted)' }}
-                          >
-                            <span className="material-symbols-outlined" style={{ fontSize: '14px' }}>edit</span>
-                            Edit
-                          </button>
-                          <button
-                            onClick={() => handleDelete(n)}
-                            title="Hapus"
-                            style={{
-                              display: 'flex', alignItems: 'center', gap: '5px',
-                              padding: '6px 12px', borderRadius: '8px',
-                              border: '1px solid rgba(239,68,68,0.25)',
-                              background: 'rgba(239,68,68,0.06)', color: '#f87171',
-                              fontSize: '12.5px', fontWeight: 600, cursor: 'pointer',
-                              fontFamily: 'var(--font-sans)', transition: 'all 0.15s ease',
-                            }}
-                            onMouseOver={e => { e.currentTarget.style.background = 'rgba(239,68,68,0.14)' }}
-                            onMouseOut={e => { e.currentTarget.style.background = 'rgba(239,68,68,0.06)' }}
-                          >
-                            <span className="material-symbols-outlined" style={{ fontSize: '14px' }}>delete</span>
-                            Hapus
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  )
-                })
-              )}
-            </tbody>
-          </table>
-        </div>
-
-        {/* Footer */}
-        {!loading && filtered.length > 0 && (
-          <div style={{ padding: '12px 20px', borderTop: '1px solid var(--border-table)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <p style={{ fontSize: '12px', color: 'var(--text-muted)', margin: 0 }}>
-              Menampilkan <strong style={{ color: 'var(--text-secondary)' }}>{filtered.length}</strong> dari <strong style={{ color: 'var(--text-secondary)' }}>{nasabahList.length}</strong> nasabah
-            </p>
-            <button onClick={fetchNasabah} style={{
-              display: 'flex', alignItems: 'center', gap: '5px',
-              background: 'none', border: 'none', color: 'var(--text-muted)',
-              fontSize: '12px', cursor: 'pointer', fontFamily: 'var(--font-sans)',
-            }}>
-              <span className="material-symbols-outlined" style={{ fontSize: '14px' }}>refresh</span>
-              Refresh
-            </button>
-          </div>
-        )}
           </>
         ) : (
           <>
@@ -726,25 +1070,23 @@ export default function CustomerManagement() {
                               : <span style={{ color: 'var(--text-subtle)', fontSize: '12px' }}>-</span>}
                           </td>
                           <td style={{ textAlign: 'right' }}>
-                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '6px' }}>
-                              <button
-                                onClick={() => handleDeleteLoker(l)}
-                                title="Hapus"
-                                style={{
-                                  display: 'flex', alignItems: 'center', gap: '5px',
-                                  padding: '6px 12px', borderRadius: '8px',
-                                  border: '1px solid rgba(239,68,68,0.25)',
-                                  background: 'rgba(239,68,68,0.06)', color: '#f87171',
-                                  fontSize: '12.5px', fontWeight: 600, cursor: 'pointer',
-                                  fontFamily: 'var(--font-sans)', transition: 'all 0.15s ease',
-                                }}
-                                onMouseOver={e => { e.currentTarget.style.background = 'rgba(239,68,68,0.14)' }}
-                                onMouseOut={e => { e.currentTarget.style.background = 'rgba(239,68,68,0.06)' }}
-                              >
-                                <span className="material-symbols-outlined" style={{ fontSize: '14px' }}>delete</span>
-                                Hapus
-                              </button>
-                            </div>
+                            <button
+                              onClick={() => handleDeleteLoker(l)}
+                              title="Hapus"
+                              style={{
+                                display: 'flex', alignItems: 'center', gap: '5px',
+                                padding: '6px 12px', borderRadius: '8px',
+                                border: '1px solid rgba(239,68,68,0.25)',
+                                background: 'rgba(239,68,68,0.06)', color: '#f87171',
+                                fontSize: '12.5px', fontWeight: 600, cursor: 'pointer',
+                                fontFamily: 'var(--font-sans)', transition: 'all 0.15s ease',
+                              }}
+                              onMouseOver={e => { e.currentTarget.style.background = 'rgba(239,68,68,0.14)' }}
+                              onMouseOut={e => { e.currentTarget.style.background = 'rgba(239,68,68,0.06)' }}
+                            >
+                              <span className="material-symbols-outlined" style={{ fontSize: '14px' }}>delete</span>
+                              Hapus
+                            </button>
                           </td>
                         </tr>
                       )
@@ -777,12 +1119,12 @@ export default function CustomerManagement() {
       {showModal && (
         <NasabahModal
           editData={editTarget}
+          allNasabah={nasabahList}
           onClose={() => { setShowModal(false); setEditTarget(null) }}
           onSuccess={handleModalSuccess}
         />
       )}
 
-      {/* ── Toast */}
       {showLokerModal && (
         <LokerModal
           onClose={() => setShowLokerModal(false)}

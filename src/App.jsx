@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { HashRouter as Router, Routes, Route } from 'react-router-dom'
+import { HashRouter as Router, Routes, Route, useNavigate } from 'react-router-dom'
 import { supabase } from './lib/supabaseClient'
 
 import Sidebar from './components/Sidebar'
@@ -14,6 +14,8 @@ import AccessHistory from './components/AccessHistory'
 import Settings from './components/Settings'
 import WebcamWidget from './components/WebcamWidget'
 import CameraPage from './pages/CameraPage'
+import BottomNav from './components/BottomNav'
+import SerialMonitor from './components/SerialMonitor'
 
 function Dashboard() {
   const [doorLogs, setDoorLogs] = useState([])
@@ -122,6 +124,7 @@ function Dashboard() {
 }
 
 function MainLayout() {
+  const navigate = useNavigate()
   return (
     <div style={{ display: 'flex', width: '100%', minHeight: '100vh', background: 'var(--bg-body)', transition: 'background 0.25s ease' }}>
       <Sidebar />
@@ -134,7 +137,7 @@ function MainLayout() {
             <button className="topbar-btn" title="Notifikasi">
               <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>notifications</span>
             </button>
-            <button className="topbar-btn" title="Pengaturan">
+            <button className="topbar-btn" title="Pengaturan" onClick={() => navigate('/settings')}>
               <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>settings</span>
             </button>
             <div style={{
@@ -155,6 +158,7 @@ function MainLayout() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/customers" element={<CustomerManagement />} />
             <Route path="/history" element={<AccessHistory />} />
+            <Route path="/serial" element={<SerialMonitor />} />
             <Route path="/settings" element={<Settings />} />
           </Routes>
 
@@ -167,6 +171,7 @@ function MainLayout() {
         </main>
       </div>
       <WebcamWidget />
+      <BottomNav />
     </div>
   )
 }

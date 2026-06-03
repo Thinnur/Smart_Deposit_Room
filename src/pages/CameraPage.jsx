@@ -25,9 +25,9 @@ export default function CameraPage() {
 
       const video = videoRef.current
       const canvas = canvasRef.current
-      canvas.width = 1280
-      canvas.height = 720
-      canvas.getContext('2d').drawImage(video, 0, 0, 1280, 720)
+      canvas.width  = video.videoWidth  || 1280
+      canvas.height = video.videoHeight || 720
+      canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height)
 
       const blob = await new Promise((resolve, reject) => {
         canvas.toBlob((b) => b ? resolve(b) : reject(new Error('toBlob failed')), 'image/jpeg', 0.9)
@@ -76,9 +76,9 @@ export default function CameraPage() {
 
       const video = videoRef.current
       const canvas = canvasRef.current
-      canvas.width = 1280
-      canvas.height = 720
-      canvas.getContext('2d').drawImage(video, 0, 0, 1280, 720)
+      canvas.width  = video.videoWidth  || 1280
+      canvas.height = video.videoHeight || 720
+      canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height)
 
       const blob = await new Promise((resolve, reject) => {
         canvas.toBlob((b) => b ? resolve(b) : reject(new Error('toBlob failed')), 'image/jpeg', 0.9)

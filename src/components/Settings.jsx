@@ -23,6 +23,11 @@ const labelStyle = {
   textTransform: 'uppercase',
 }
 
+const sendRefreshCache = async () => {
+  if (!supabase) return
+  await supabase.from('commands').insert({ type: 'REFRESH_CACHE', status: 'pending' }).catch(() => {})
+}
+
 export default function Settings() {
   const [form, setForm] = useState({ jam_buka: '', jam_tutup: '' })
   const [loading, setLoading] = useState(true)
@@ -89,7 +94,8 @@ export default function Settings() {
         .eq('id', 1)
 
       if (error) throw error
-      setMessage({ type: 'success', text: 'Pengaturan operasional berhasil disimpan.' })
+      await sendRefreshCache()
+      setMessage({ type: 'success', text: 'Pengaturan operasional berhasil disimpan. Cache ESP diperbarui.' })
     } catch (err) {
       console.error('updateSettings:', err)
       setMessage({ type: 'error', text: 'Gagal menyimpan pengaturan sistem.' })

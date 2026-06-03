@@ -4,6 +4,7 @@ const navItems = [
   { to: '/', label: 'Dashboard', icon: 'dashboard', end: true },
   { to: '/customers', label: 'Manajemen Nasabah', icon: 'group' },
   { to: '/history', label: 'Riwayat Akses', icon: 'history' },
+  { to: '/serial', label: 'Serial Monitor', icon: 'terminal' },
   { to: '/settings', label: 'Pengaturan Sistem', icon: 'settings' },
 ]
 

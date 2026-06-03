@@ -609,3 +609,67 @@ body {
 .webcam-widget__btn--danger  { background: #ef4444; color: #fff; }
 .webcam-widget__btn--warning { background: #f59e0b; color: #fff; }
 .webcam-widget__btn--success { background: #22c55e; color: #fff; }
+
+/* ═══════════════════════════════════════════════════════
+   BOTTOM NAV — mobile only (≤ 1023px)
+═══════════════════════════════════════════════════════ */
+.bottom-nav {
+  display: none;
+}
+
+@media (max-width: 1023px) {
+  .bottom-nav {
+    display: flex;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 64px;
+    background: var(--bg-card);
+    border-top: 1px solid var(--border-card);
+    box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.08);
+    z-index: 50;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    align-items: stretch;
+  }
+
+  .bottom-nav__item {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    text-decoration: none;
+    color: var(--text-muted);
+    border-radius: 10px;
+    margin: 6px 4px;
+    transition: color 0.15s ease, background 0.15s ease;
+  }
+
+  .bottom-nav__item--active {
+    color: #3b82f6;
+    background: rgba(59, 130, 246, 0.08);
+  }
+
+  .bottom-nav__icon {
+    font-size: 22px !important;
+  }
+
+  .bottom-nav__label {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    line-height: 1;
+  }
+
+  /* Push main content above bottom nav */
+  .main-wrapper main {
+    padding-bottom: 80px !important;
+  }
+
+  /* Keep webcam widget above bottom nav */
+  .webcam-widget {
+    bottom: 80px;
+  }
+}
